@@ -1,0 +1,39 @@
+[package]
+name = "sim-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "56sim"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+metal = ["llama-cpp-2/metal"]
+# TTS is runtime-loaded (libloading), so this feature only gates TTS UI strings/tests.
+tts = []
+
+[dependencies]
+sim-core = { workspace = true }
+marchgen = { workspace = true }
+audiocpp-sys = { workspace = true }
+gtk4 = { workspace = true }
+libadwaita = { workspace = true }
+glib = { workspace = true }
+rodio = { workspace = true }
+cpal = { workspace = true }
+llama-cpp-2 = { workspace = true }
+ureq = { workspace = true }
+dirs = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+libc = { workspace = true }
+libloading = { workspace = true }
+
+[target.'cfg(target_os = "openbsd")'.dependencies]
+sndio = { workspace = true }

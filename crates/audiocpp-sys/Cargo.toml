@@ -1,0 +1,9 @@
+[package]
+name = "audiocpp-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libloading = { workspace = true }
+libc = { workspace = true }

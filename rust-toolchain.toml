@@ -1,0 +1,6 @@
+# profile minimal avoids inheriting globally-added optional components (miri, cranelift)
+# that lack downloads on some channels/targets.
+[toolchain]
+channel = "1.89.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
