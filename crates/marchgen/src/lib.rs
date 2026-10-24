@@ -2,10 +2,10 @@
 //!
 //! Pure `std`, fully deterministic from a single `u64` seed. One
 //! [`MarchGenerator`] yields an endless stream of mono `f32` samples at
-//! [`SAMPLE_RATE`]: a 30-bar march (4-bar snare-roll intro, A A' B A'' of
-//! 8 bars each, 2-bar cymbal outro) followed by the next piece seeded via
-//! splitmix64. All synthesis state lives in fixed arrays — no heap
-//! allocation per sample.
+//! [`SAMPLE_RATE`]: a march of 38 bars 4/4 — 4-bar snare-roll intro,
+//! A(8) A'(8) B(8, subdominant) A''(8), 2-bar cymbal outro — followed by
+//! the next piece seeded `splitmix64(prev)`. All synthesis state lives in
+//! fixed arrays; the render loop performs no heap allocation.
 
 /// Sample rate of every stream produced by this crate, in Hz (mono).
 pub const SAMPLE_RATE: u32 = 44_100;
@@ -21,29 +21,20 @@ pub enum Mode {
     Major,
 }
 
-/// Number of 4/4 bars in one march: intro + A + A' + B + A'' + outro.
-const TOTAL_BARS: usize = 30;
+/// Bars per piece: intro(4) + A(8) + A'(8) + B(8) + A''(8) + outro(2).
 const INTRO_BARS: usize = 4;
 const SECTION_BARS: usize = 8;
 const OUTRO_BARS: usize = 2;
-const STEPS_PER_BAR: usize = 8;
+const TOTAL_BARS: usize = INTRO_BARS + 4 * SECTION_BARS + OUTRO_BARS; // 38
+const STEPS_PER_BAR: usize = 8; // 8th-note grid
 const PIECE_STEPS: usize = TOTAL_BARS * STEPS_PER_BAR;
-
-const SONG_FORM: [(&str, usize); 6] = [
-    ("intro", 4),
-    ("A", 8),
-    ("A'", 8),
-    ("B", 8),
-    ("A''", 8),
-    ("outro", 2),
-];
 
 const MODES: [Mode; 3] = [Mode::NaturalMinor, Mode::HarmonicMinor, Mode::Major];
 const BPMS: [u16; 4] = [96, 104, 112, 120];
 const PROGRESSIONS_MINOR: [[usize; 4]; 3] = [
-    [1, 6, 5, 4], // i – VII – VI – V
-    [1, 4, 6, 1], // i – iv – VII – i
-    [1, 5, 6, 4], // i – v – VI – V
+    [1, 7, 6, 5], // i – VII – VI – V
+    [1, 4, 7, 1], // i – iv – VII – i
+    [1, 5, 6, 5], // i – v – VI – V
 ];
 const PROGRESSIONS_MAJOR: [[usize; 4]; 2] = [
     [1, 5, 6, 4], // I – V – vi – IV
@@ -107,16 +98,16 @@ impl PiecePlan {
         (TOTAL_BARS * 4) as f64 * 60.0 / self.bpm as f64
     }
 
+    /// Scale degree of the chord sounding in `bar` of the piece.
     fn chord_degree(&self, bar: usize) -> usize {
-        let melody_bar = bar - INTRO_BARS;
-        if bar >= TOTAL_BARS - OUTRO_BARS {
-            return 1; // outro rests on the tonic
+        if bar < INTRO_BARS || bar >= TOTAL_BARS - OUTRO_BARS {
+            return 1; // intro is percussion-only; outro rests on the tonic
         }
-        let section = (melody_bar / SECTION_BARS) % 4;
+        let melody_bar = bar - INTRO_BARS;
+        let section = melody_bar / SECTION_BARS; // 0 A, 1 A', 2 B, 3 A''
         let local = melody_bar % SECTION_BARS;
-        let dominant = if self.mode == Mode::Major { 5 } else { 4 };
         if local >= SECTION_BARS - 2 {
-            return dominant; // cadence: two bars of V at each section end
+            return 5; // cadence: two bars of the dominant at each section end
         }
         let offset = if section == 2 { 2 } else { 0 }; // B starts off-centre
         self.progression[(local + offset) % self.progression.len()]
@@ -124,18 +115,16 @@ impl PiecePlan {
 
     fn root_midi(&self, degree: usize) -> u8 {
         let semi = i32::from(scale_semitones(self.mode)[(degree - 1) % 7]);
-        let pitch = 40 + self.key_root as i32 + semi;
-        (48 + (pitch - 48).rem_euclid(12)) as u8 // tuba register C2..B2
+        (48 + (40 + self.key_root as i32 + semi - 48).rem_euclid(12)) as u8 // C2..B2
     }
 
     fn melody_midi(&self, degree: usize) -> u8 {
         let semi = i32::from(scale_semitones(self.mode)[(degree - 1) % 7]);
-        let pitch = 67 + self.key_root as i32 + semi;
-        (67 + (pitch - 67).rem_euclid(12)) as u8 // trumpet register G4..F#5
+        (67 + (67 + self.key_root as i32 + semi - 67).rem_euclid(12)) as u8 // G4..F#5
     }
 }
 
-/// splitmix64, the piece-to-piece and per-piece random stream.
+/// splitmix64: the piece-to-piece and per-piece random stream.
 struct SplitMix64(u64);
 
 impl SplitMix64 {
@@ -160,8 +149,7 @@ impl SplitMix64 {
 }
 
 fn next_piece_seed(prev: u64) -> u64 {
-    let mut s = SplitMix64(prev);
-    let n = s.next_u64();
+    let n = SplitMix64(prev).next_u64();
     if n == 0 {
         u64::MAX / 3
     } else {
@@ -180,9 +168,10 @@ const VOICE_PICCOLO: u8 = 3;
 const VOICE_BASS_DRUM: u8 = 4;
 const VOICE_SNARE: u8 = 5;
 const VOICE_CYMBAL: u8 = 6;
+const VOICE_TROMBONE: u8 = 7;
 
-/// Duration in seconds for each voice kind; 0 = use the trigger's `hold`.
-const VOICE_DECAY: [f32; 7] = [0.0, 0.0, 0.0, 0.40, 0.20, 0.030, 1.5];
+/// Fixed decay in seconds per voice kind; 0 = use the trigger's `hold`.
+const VOICE_DECAY: [f32; 8] = [0.0, 0.0, 0.0, 0.40, 0.20, 0.030, 1.5, 0.0];
 
 const MAX_VOICES: usize = 32;
 const NOISE_TABLE_SIZE: usize = 4096;
@@ -191,7 +180,6 @@ const NOISE_TABLE_SIZE: usize = 4096;
 #[derive(Clone, Copy)]
 struct Voice {
     kind: u8,
-    freq: f32,
     phase: f32,
     phase_step: f32,
     amp: f32,
@@ -200,14 +188,12 @@ struct Voice {
     a1: f32,
     z1: f32,
     z2: f32,
-    hp_y1: f32,
-    hp_x1: f32,
+    lp_x1: f32,
     noise_idx: usize,
 }
 
 const SILENT_VOICE: Voice = Voice {
     kind: VOICE_SILENT,
-    freq: 0.0,
     phase: 0.0,
     phase_step: 0.0,
     amp: 0.0,
@@ -216,19 +202,18 @@ const SILENT_VOICE: Voice = Voice {
     a1: 0.0,
     z1: 0.0,
     z2: 0.0,
-    hp_y1: 0.0,
-    hp_x1: 0.0,
+    lp_x1: 0.0,
     noise_idx: 0,
 };
 
 const SQUARE_MIX: f32 = 0.55;
-const MASTER_GAIN: f32 = 0.60;
+const MASTER_GAIN: f32 = 0.55;
 const DOWNBEAT_GAIN: f32 = 1.189_207_1; // +1.5 dB
 
 const G_TRUMPET: f32 = 0.15;
 const G_TUBA_ROOT: f32 = 0.20;
 const G_TUBA_FIFTH: f32 = 0.14;
-const G_TROMBONE: f32 = 0.12;
+const G_TROMBONE: f32 = 0.11;
 const G_PICCOLO: f32 = 0.07;
 const G_SNARE: f32 = 0.09;
 const G_SNARE_ACCENT: f32 = 0.135;
@@ -238,11 +223,15 @@ const G_BASS_DRUM: f32 = 0.45;
 const G_CYMBAL: f32 = 0.11;
 
 const TWO_PI: f32 = core::f32::consts::PI * 2.0;
-const ROOT_1_26: f32 = 1.259_921; // major third above the fundamental
-const ROOT_1_5: f32 = 1.5; // perfect fifth above the fundamental
+const ATTACK_SECS: f32 = 0.02;
+
+fn midi_hz(midi: u8) -> f32 {
+    440.0 * 2.0f32.powf((f32::from(midi) - 69.0) / 12.0)
+}
 
 /// Endless procedural march stream: an `Iterator<Item = f32>` of mono
-/// samples, one piece after the other, each fully determined by its seed.
+/// samples at [`SAMPLE_RATE`], one piece after the other, every piece fully
+/// determined by `splitmix64` iterating from the seed given to [`Self::new`].
 pub struct MarchGenerator {
     piece_seed: u64,
     plan: PiecePlan,
@@ -253,14 +242,12 @@ pub struct MarchGenerator {
     step: usize,
     sample_in_step: usize,
     step_len: usize,
-    piece_samples: usize,
-    piece_sample: usize,
     any_voice_on: bool,
 }
 
 impl MarchGenerator {
     /// Start an endless march stream whose first piece is composed from
-    /// `seed`; subsequent pieces use `splitmix64(prev)`.
+    /// `seed`; subsequent pieces use `splitmix64(prev)` as their seed.
     pub fn new(seed: u64) -> Self {
         let mut gen = MarchGenerator {
             piece_seed: seed,
@@ -272,8 +259,6 @@ impl MarchGenerator {
             step: 0,
             sample_in_step: 0,
             step_len: 0,
-            piece_samples: 0,
-            piece_sample: 0,
             any_voice_on: false,
         };
         gen.setup_piece(seed);
@@ -298,44 +283,39 @@ impl MarchGenerator {
             self.piccolo_bars[bar] = rng.next_f64() < 0.25;
         }
         self.build_melody(&mut rng);
+        // 8th-note in samples; integer division keeps the stream deterministic.
         self.step_len = (SAMPLE_RATE as u64 * 60 / self.plan.bpm as u64 / 2) as usize;
-        self.piece_samples = self.step_len * PIECE_STEPS;
         self.step = 0;
         self.sample_in_step = 0;
-        self.piece_sample = 0;
-        for v in self.voices.iter_mut() {
-            *v = SILENT_VOICE;
-        }
-        self.any_voice_on = false;
     }
 
-    /// Lay three 8-bar sections (A, B, A') on the 8th-note grid: motif
-    /// statement, exact restatement, response cadencing to the tonic;
-    /// the third A' section reuses A.
+    /// Lay the four 8-bar melody sections on the 8th-note grid: A = motif,
+    /// A' = identical restatement, B = second motif transposed to the
+    /// subdominant, A'' = motif again.
     fn build_melody(&mut self, rng: &mut SplitMix64) {
         self.grid = [0; PIECE_STEPS];
         let a = self.motif(rng);
         let b = self.motif(rng);
-        self.fill_section(INTRO_BARS, &a, 0);
-        self.fill_section(INTRO_BARS + 2 * SECTION_BARS, &a, 0);
-        self.fill_section(INTRO_BARS + SECTION_BARS, &b, 5); // B: subdominant
+        self.fill_section(INTRO_BARS, &a, 0); // A
+        self.fill_section(INTRO_BARS + SECTION_BARS, &a, 0); // A'
+        self.fill_section(INTRO_BARS + 2 * SECTION_BARS, &b, 5); // B, subdominant
+        self.fill_section(INTRO_BARS + 3 * SECTION_BARS, &a, 0); // A''
     }
 
-    /// A 4–8-note chord-tone walk: [degree; 8], notes per phrase, slot
-    /// durations per note (1 = an eighth-note tap).
+    /// A 4–8-note chord-tone walk: degrees (1-based), note count, per-note
+    /// slot durations (1 = an eighth-note tap).
     fn motif(&self, rng: &mut SplitMix64) -> ([usize; 8], usize, [u8; 8]) {
         let n = rng.range(4, 9);
         let mut degrees = [1usize; 8];
         let mut durs = [1u8; 8];
         for i in 0..n {
-            let bar = i / 4;
-            let degree = self.plan.chord_degree(INTRO_BARS + bar);
+            let degree = self.plan.chord_degree(INTRO_BARS + i / 4);
             let chord = [(degree - 1) % 7, (degree + 1) % 7, (degree + 3) % 7];
-            if i % 4 == 0 {
-                degrees[i] = chord[0] + 1; // chord root on the phrase head
+            degrees[i] = if i % 4 == 0 {
+                chord[0] + 1 // chord root on each phrase head
             } else {
-                degrees[i] = chord[rng.range(0, 3)] + 1;
-            }
+                chord[rng.range(0, 3)] + 1
+            };
             durs[i] = if rng.next_f64() < 0.4 {
                 1
             } else if rng.next_f64() < 0.55 {
@@ -348,41 +328,36 @@ impl MarchGenerator {
     }
 
     fn fill_section(&mut self, start_bar: usize, motif: &([usize; 8], usize, [u8; 8]), transpose: i32) {
+        let (degrees, n, durs) = *motif;
+        let base = start_bar * STEPS_PER_BAR;
         for phrase in 0..4 {
-            let (degrees, n, durs) = *motif;
-            let mut pos = phrase * 16;
-            let mut prev = i32::from(self.plan.melody_midi(degrees[0]));
+            let pstart = base + phrase * 16;
+            let pend = (pstart + 16).min(PIECE_STEPS);
+            let mut pos = pstart;
+            let mut prev = i32::from(self.plan.melody_midi(degrees[0])) + transpose;
             for i in 0..n {
                 let mut pitch = i32::from(self.plan.melody_midi(degrees[i]));
-                while pitch < prev - 4 {
+                while pitch < prev - 16 {
                     pitch += 12;
                 }
                 while pitch > prev + 9 {
                     pitch -= 12;
                 }
-                prev = pitch;
-                let pitch = pitch + transpose;
-                let start = pos;
-                for k in 0..durs[i] as usize {
-                    if pos >= PIECE_STEPS {
-                        break;
-                    }
-                    self.grid[pos] = pitch as u8;
-                    pos += 1;
-                }
-                if start >= PIECE_STEPS {
+                prev = pitch + transpose;
+                if pos >= pend {
                     break;
                 }
-                if pos >= PIECE_STEPS {
-                    pos = start + 1;
+                let note_end = (pos + durs[i] as usize).min(pend);
+                while pos < note_end {
+                    self.grid[pos] = prev as u8;
+                    pos += 1;
                 }
             }
-            while pos < (phrase + 1) * 16 && pos < PIECE_STEPS {
+            while pos < pend {
                 self.grid[pos] = prev as u8; // eighth-note taps of the last note
                 pos += 1;
             }
         }
-        let _ = start_bar; // sections are laid out by their step ranges
     }
 
     // -- triggering ---------------------------------------------------------
@@ -397,7 +372,8 @@ impl MarchGenerator {
         let mut oldest = 0;
         let mut lowest = f32::MAX;
         for i in 0..MAX_VOICES {
-            let a = self.voices[i].amp * (-self.voices[i].elapsed / (self.voices[i].decay + 1e-6)).exp();
+            let a = self.voices[i].amp
+                * (-self.voices[i].elapsed / (self.voices[i].decay + 1e-6)).exp();
             if a < lowest {
                 lowest = a;
                 oldest = i;
@@ -408,7 +384,11 @@ impl MarchGenerator {
     }
 
     fn trigger(&mut self, kind: u8, freq: f32, amp: f32, hold_secs: f32) {
-        if amp <= 0.0 || freq <= 0.0 {
+        let tonal = matches!(
+            kind,
+            VOICE_TRUMPET | VOICE_TUBA | VOICE_PICCOLO | VOICE_TROMBONE
+        );
+        if amp <= 0.0 || (tonal && freq <= 0.0) {
             return;
         }
         let decay = VOICE_DECAY[kind as usize];
@@ -420,7 +400,6 @@ impl MarchGenerator {
         };
         let v = &mut self.voices[i];
         v.kind = kind;
-        v.freq = freq;
         v.phase = 0.0;
         v.phase_step = TWO_PI * freq / SAMPLE_RATE as f32;
         v.amp = amp;
@@ -429,8 +408,7 @@ impl MarchGenerator {
         v.a1 = a1;
         v.z1 = 0.0;
         v.z2 = 0.0;
-        v.hp_y1 = 0.0;
-        v.hp_x1 = 0.0;
+        v.lp_x1 = 0.0;
         v.noise_idx = (kind as usize)
             .wrapping_mul(0x9E37_79B1)
             .wrapping_add(self.piece_seed as usize);
@@ -447,7 +425,8 @@ impl MarchGenerator {
         let g = if downbeat { DOWNBEAT_GAIN } else { 1.0 };
         let step_secs = self.step_len as f32 / SAMPLE_RATE as f32;
 
-        // Snare: all eighths (beats 1 & 3 accented), rolls in intro/outro.
+        // Snare: filtered noise on all eighths, beats 1 & 3 accented,
+        // rolls in the intro and outro.
         if is_intro || is_outro {
             if s % 2 == 0 {
                 let a = if s == 0 { G_SNARE_ROLL_ACCENT } else { G_SNARE_ROLL };
@@ -462,13 +441,13 @@ impl MarchGenerator {
             self.trigger(VOICE_SNARE, 0.0, a * g, 0.030);
         }
 
-        // Bass drum: 55 Hz decaying sine + click on beats 1 & 3 (dut in intro).
+        // Bass drum: 55 Hz decaying sine + click on beats 1 & 3 (the dut).
         if s == 0 || s == 4 {
             self.trigger(VOICE_BASS_DRUM, 55.0, G_BASS_DRUM * g, 0.0);
         }
 
         if is_intro {
-            return; // intro is snare roll + dut only
+            return; // the intro is snare roll + dut only
         }
 
         let degree = self.plan.chord_degree(bar);
@@ -480,6 +459,7 @@ impl MarchGenerator {
             self.trigger(VOICE_TUBA, midi_hz(root + 7), G_TUBA_FIFTH, tuba_secs);
         }
         if s == 2 || s == 6 {
+            // Trombone chord stabs on beats 2 & 4.
             self.trigger(VOICE_TROMBONE, midi_hz(root + 12), G_TROMBONE, 0.22);
             self.trigger(VOICE_TROMBONE, midi_hz(root + 16), G_TROMBONE * 0.85, 0.22);
             self.trigger(VOICE_TROMBONE, midi_hz(root + 19), G_TROMBONE * 0.8, 0.22);
@@ -498,6 +478,8 @@ impl MarchGenerator {
         }
     }
 
+    // -- rendering ----------------------------------------------------------
+
     fn render_sample(&mut self) -> f32 {
         if self.step >= PIECE_STEPS {
             self.setup_piece(next_piece_seed(self.piece_seed));
@@ -513,7 +495,13 @@ impl MarchGenerator {
                 if v.kind == VOICE_SILENT {
                     continue;
                 }
-                let env = (-(v.elapsed / v.decay)).exp();
+                let mut env = (-(v.elapsed / v.decay)).exp();
+                if matches!(
+                    v.kind,
+                    VOICE_TRUMPET | VOICE_TUBA | VOICE_PICCOLO | VOICE_TROMBONE
+                ) {
+                    env *= (v.elapsed / ATTACK_SECS).min(1.0);
+                }
                 v.elapsed += 1.0 / SAMPLE_RATE as f32;
                 if env < 1e-4 {
                     v.kind = VOICE_SILENT;
@@ -522,6 +510,7 @@ impl MarchGenerator {
                 any = true;
                 let raw = match v.kind {
                     VOICE_TRUMPET => {
+                        // square + low-pass 2.2 kHz Q0.7, vibrato 5 Hz 0.3 %
                         let f = v.phase_step * (1.0 + 0.003 * (TWO_PI * 5.0 * v.elapsed).sin());
                         v.phase += f;
                         if v.phase >= TWO_PI {
@@ -532,18 +521,17 @@ impl MarchGenerator {
                         v.z2 += v.a1 * (v.z1 - v.z2);
                         SQUARE_MIX * square + (1.0 - SQUARE_MIX) * v.z2
                     }
-                    VOICE_TUBA | VOICE_PICCOLO => {
+                    VOICE_TUBA | VOICE_PICCOLO | VOICE_TROMBONE => {
+                        // sine + 3rd/5th harmonics
                         v.phase += v.phase_step;
                         if v.phase >= TWO_PI {
                             v.phase -= TWO_PI;
                         }
                         let s1 = v.phase.sin();
-                        let c1 = v.phase.cos();
-                        let s2 = 2.0 * s1 * c1;
                         let s3 = s1 * (3.0 - 4.0 * s1 * s1);
-                        let s126 = s1 * c1.mul_add(ROOT_1_26 * 0.26, c1); // sin(1.26 φ)
-                        let s15 = 2.0 * s1 * c1.mul_add(ROOT_1_5 - 1.0, 0.0); // rough sin(1.5 φ)
-                        s1 + 0.28 * s3 + 0.14 * s126 + 0.12 * s15 + 0.18 * s2
+                        let s1sq = s1 * s1;
+                        let s5 = s1 * (16.0 * s1sq * s1sq - 20.0 * s1sq + 5.0);
+                        s1 + 0.30 * s3 + 0.15 * s5
                     }
                     VOICE_BASS_DRUM => {
                         v.phase += v.phase_step;
@@ -561,11 +549,10 @@ impl MarchGenerator {
                     VOICE_SNARE | VOICE_CYMBAL => {
                         let n = self.noise[v.noise_idx & (NOISE_TABLE_SIZE - 1)];
                         v.noise_idx = v.noise_idx.wrapping_add(1);
-                        let lp = v.hp_x1 + 0.35 * (n - v.hp_x1); // ~1.6 kHz one-pole
-                        v.hp_x1 = lp;
-                        let hp = n - lp;
-                        v.hp_y1 = hp + 0.9 * v.hp_y1; // one-pole highpass
-                        v.hp_y1 - 0.9 * v.hp_y1 + hp // crisp band, keeps it cheap
+                        let coeff = if v.kind == VOICE_CYMBAL { 0.06 } else { 0.35 };
+                        let lp = v.lp_x1 + coeff * (n - v.lp_x1); // one-pole LP
+                        v.lp_x1 = lp;
+                        n - lp // complement = high-passed noise
                     }
                     _ => 0.0,
                 };
@@ -578,7 +565,6 @@ impl MarchGenerator {
             self.sample_in_step = 0;
             self.step += 1;
         }
-        self.piece_sample += 1;
         (MASTER_GAIN * out).tanh()
     }
 }
@@ -589,10 +575,6 @@ impl Iterator for MarchGenerator {
     fn next(&mut self) -> Option<f32> {
         Some(self.render_sample())
     }
-}
-
-fn midi_hz(midi: u8) -> f32 {
-    440.0 * 2.0f32.powf((f32::from(midi) - 69.0) / 12.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -619,7 +601,7 @@ fn wav_header(data_bytes: u32) -> [u8; 44] {
 }
 
 /// Render `seconds` of the endless march stream for `seed` to a 16-bit PCM
-/// mono WAV file at `path`.
+/// mono WAV file at `path` (hand-rolled header, no dependencies).
 #[cfg(feature = "dump")]
 pub fn render_wav(seed: u64, seconds: u32, path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write;
@@ -637,9 +619,8 @@ pub fn render_wav(seed: u64, seconds: u32, path: &std::path::Path) -> std::io::R
     while done < n {
         let take = core::cmp::min(8192, n - done);
         for i in 0..take {
-            let s = gen.next().unwrap_or(0.0);
-            let clamped = s.clamp(-1.0, 1.0);
-            let q = (clamped * i16::MAX as f32).round() as i16;
+            let s = gen.next().unwrap_or(0.0).clamp(-1.0, 1.0);
+            let q = (s * i16::MAX as f32).round() as i16;
             chunk[2 * i..2 * i + 2].copy_from_slice(&q.to_le_bytes());
         }
         file.write_all(&chunk[..take * 2])?;
