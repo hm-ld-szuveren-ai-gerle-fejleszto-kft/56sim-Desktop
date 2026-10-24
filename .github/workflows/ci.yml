@@ -36,7 +36,7 @@ jobs:
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-gettext
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: rustfmt, clippy
 
